@@ -134,12 +134,6 @@ export default function TradingBotPage() {
     return (avgPnL / (accountBalance?.totalEquity || 10000)) * 100;
   };
 
-  // Calcular variação percentual com base no preço de 24h atrás
-  const calculateChange24h = (): number => {
-    if (!marketData || !price24hAgo || price24hAgo === 0) return 0;
-    return ((marketData.price - price24hAgo) / price24hAgo) * 100;
-  };
-
   // Atualizar dados de mercado
   const updateMarketData = async () => {
     const apiClient = apiClientRef.current;
@@ -364,6 +358,12 @@ export default function TradingBotPage() {
   const toggleBot = () => {
     setIsRunning(!isRunning);
     setBotStatus(prev => ({ ...prev, isRunning: !isRunning }));
+  };
+
+  // Calcular variação percentual com base no preço de 24h atrás
+  const calculateChange24h = (): number => {
+    if (!marketData || !price24hAgo || price24hAgo === 0) return 0;
+    return ((marketData.price - price24hAgo) / price24hAgo) * 100;
   };
 
   // Renderizar apenas após montagem
