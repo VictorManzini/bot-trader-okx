@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Settings, TrendingUp, TrendingDown, Activity, DollarSign, AlertCircle, CheckCircle, XCircle, Info, ChevronDown, Search, Clock, Target } from 'lucide-react';
+import { Play, Pause, Settings, TrendingUp, TrendingDown, Activity, DollarSign, AlertCircle, CheckCircle, XCircle, Info, ChevronDown, Search, Clock, Target, BarChart3 } from 'lucide-react';
 import { OKXApiClient, TradingPair, CandlePrediction } from '@/lib/okx-api';
 import { 
   generateTradingSignal, 
@@ -462,12 +462,16 @@ export default function TradingBotPage() {
     return ((marketData.price - price24hAgo) / price24hAgo) * 100;
   };
 
-  // Formatar tempo restante
+  // Formatar tempo restante em horas e minutos
   const formatTimeRemaining = (seconds: number): string => {
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${minutes}m ${secs}s`;
+    const totalMinutes = Math.floor(seconds / 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
   };
 
   // Formatar horário de fechamento
@@ -478,6 +482,45 @@ export default function TradingBotPage() {
       minute: '2-digit',
       second: '2-digit'
     });
+  };
+
+  // Componente MiniChart para visualização de preços
+  const MiniChart = ({ prices }: { prices: number[] }) => {
+    if (!prices || prices.length === 0) return null;
+
+    const maxPrice = Math.max(...prices);
+    const minPrice = Math.min(...prices);
+    const priceRange = maxPrice - minPrice;
+    
+    // Normalizar preços para altura do gráfico (0-100%)
+    const normalizedPrices = prices.map(price => {
+      if (priceRange === 0) return 50; // Se não há variação, centralizar
+      return ((price - minPrice) / priceRange) * 100;
+    });
+
+    // Criar pontos SVG
+    const points = normalizedPrices.map((y, i) => {
+      const x = (i / (prices.length - 1)) * 100;
+      return `${x},${100 - y}`;
+    }).join(' ');
+
+    // Determinar cor baseado na tendência
+    const isUptrend = prices[prices.length - 1] > prices[0];
+    const color = isUptrend ? '#10b981' : '#ef4444';
+
+    return (
+      <div className="w-full h-12 mt-2">
+        <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <polyline
+            points={points}
+            fill="none"
+            stroke={color}
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
+    );
   };
 
   // Renderizar apenas após montagem
@@ -809,21 +852,47 @@ export default function TradingBotPage() {
               <div className="mb-6 bg-gradient-to-r from-purple-950/30 to-indigo-950/30 border border-purple-500/30 rounded-xl p-4 sm:p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <Target className="w-5 h-5 text-purple-400" />
-                  <h3 className="text-lg font-bold text-purple-300">Previsões de Fechamento (Dados Reais + Suavização)</h3>
+                  <h3 className="text-lg font-bold text-purple-300">Previsões de Fechamento (Análise Avançada)</h3>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   {candlePredictions.map((prediction) => (
                     <div key={prediction.timeframe} className="bg-slate-900/50 rounded-lg p-4 border border-purple-500/20">
-                      <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center justify-between mb-3">
                         <span className="text-sm font-semibold text-purple-300">{prediction.timeframe}</span>
                         <Clock className="w-4 h-4 text-purple-400" />
                       </div>
-                      <div className="text-xl font-bold text-white mb-1">
-                        ${prediction.predictedClose.toFixed(2)}
+                      
+                      {/* Preço de Fechamento Anterior */}
+                      <div className="mb-2">
+                        <div className="text-xs text-slate-500">Fechamento Anterior</div>
+                        <div className="text-sm font-semibold text-slate-300">
+                          ${prediction.previousClose?.toFixed(2) || 'N/A'}
+                        </div>
                       </div>
-                      <div className="text-xs text-slate-400 mb-2">
-                        Fecha às: {formatCloseTime(prediction.timeframe)}
+
+                      {/* Previsão de Fechamento */}
+                      <div className="mb-2">
+                        <div className="text-xs text-slate-500">Previsão de Fechamento</div>
+                        <div className="text-xl font-bold text-white">
+                          ${prediction.predictedClose.toFixed(2)}
+                        </div>
                       </div>
+
+                      {/* Horário de Fechamento */}
+                      <div className="text-xs text-slate-400 mb-3">
+                        Fecha às: <span className="text-cyan-400 font-semibold">{formatCloseTime(prediction.timeframe)}</span>
+                      </div>
+
+                      {/* Mini Gráfico */}
+                      <div className="mb-3">
+                        <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
+                          <BarChart3 className="w-3 h-3" />
+                          Evolução Recente
+                        </div>
+                        <MiniChart prices={prediction.recentPrices || []} />
+                      </div>
+
+                      {/* Tendência e Tempo Restante */}
                       <div className="flex items-center justify-between text-xs">
                         <span className={`px-2 py-1 rounded ${
                           prediction.currentTrend === 'bullish' ? 'bg-green-500/20 text-green-400' :
@@ -833,7 +902,7 @@ export default function TradingBotPage() {
                           {prediction.currentTrend === 'bullish' ? '📈 Alta' :
                            prediction.currentTrend === 'bearish' ? '📉 Baixa' : '➡️ Neutro'}
                         </span>
-                        <span className="text-slate-400">
+                        <span className="text-slate-400 font-semibold">
                           {formatTimeRemaining(prediction.timeRemaining)}
                         </span>
                       </div>
@@ -845,7 +914,7 @@ export default function TradingBotPage() {
                 </div>
                 <p className="text-xs text-purple-300 mt-4 flex items-center gap-2">
                   <Info className="w-4 h-4" />
-                  Previsões estabilizadas com suavização progressiva (1m: 30%, 15m: 50%, 1h: 70%, 4h: 80%) para evitar oscilações bruscas.
+                  Previsões baseadas em análise técnica avançada com suavização progressiva (1m: 30%, 15m: 50%, 1h: 70%, 4h: 80%) para máxima estabilidade e coerência com o mercado real.
                 </p>
               </div>
             )}

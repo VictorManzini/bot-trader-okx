@@ -13,6 +13,8 @@ export interface TradingPair {
 export interface CandlePrediction {
   timeframe: string;
   predictedClose: number;
+  previousClose?: number; // Preço de fechamento do candle anterior
+  recentPrices?: number[]; // Preços recentes para o mini gráfico
   confidence: number;
   timeRemaining: number; // segundos até fechar o candle
   currentTrend: 'bullish' | 'bearish' | 'neutral';
@@ -24,6 +26,9 @@ export class OKXApiClient {
   private passphrase: string;
   private baseUrl = 'https://www.okx.com';
   private isDryRun: boolean;
+  
+  // Cache para suavização de previsões
+  private predictionCache: Map<string, number> = new Map();
 
   constructor(credentials: ApiCredentials, isDryRun: boolean = true) {
     this.apiKey = credentials.apiKey;
@@ -298,63 +303,133 @@ export class OKXApiClient {
     try {
       const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
       
-      // Obter candles históricos para análise
-      const candles = await this.getCandles(normalizedSymbol, timeframe, 50);
+      // Obter candles históricos para análise (mais candles para timeframes maiores)
+      const candleLimit = {
+        '1m': 30,
+        '15m': 50,
+        '1h': 100,
+        '4h': 200
+      }[timeframe];
+      
+      const candles = await this.getCandles(normalizedSymbol, timeframe, candleLimit);
       const currentPrice = await this.getMarketData(normalizedSymbol);
       
       if (candles.length < 10) {
         throw new Error('Dados insuficientes para previsão');
       }
 
-      // Calcular médias móveis
-      const recentCandles = candles.slice(0, 10);
-      const avgClose = recentCandles.reduce((sum, c) => sum + c.close, 0) / recentCandles.length;
-      const avgVolume = recentCandles.reduce((sum, c) => sum + c.volume, 0) / recentCandles.length;
+      // Preço de fechamento do candle anterior (mais recente)
+      const previousClose = candles[0].close;
       
-      // Calcular momentum (taxa de mudança)
-      const momentum = (currentPrice.price - candles[9].close) / candles[9].close;
+      // Preços recentes para o mini gráfico (últimos 20 candles)
+      const recentPrices = candles.slice(0, 20).reverse().map(c => c.close);
+
+      // Calcular médias móveis com diferentes períodos baseados no timeframe
+      const maPeriods = {
+        '1m': { short: 5, medium: 10, long: 20 },
+        '15m': { short: 10, medium: 20, long: 30 },
+        '1h': { short: 20, medium: 50, long: 100 },
+        '4h': { short: 30, medium: 100, long: 150 }
+      }[timeframe];
       
-      // Calcular volatilidade (desvio padrão dos últimos 10 candles)
-      const variance = recentCandles.reduce((sum, c) => {
-        return sum + Math.pow(c.close - avgClose, 2);
-      }, 0) / recentCandles.length;
-      const volatility = Math.sqrt(variance);
+      const shortMA = this.calculateMA(candles, maPeriods.short);
+      const mediumMA = this.calculateMA(candles, maPeriods.medium);
+      const longMA = this.calculateMA(candles, maPeriods.long);
       
-      // Determinar tendência
-      const shortMA = recentCandles.slice(0, 5).reduce((sum, c) => sum + c.close, 0) / 5;
-      const longMA = avgClose;
+      // Calcular EMA (Exponential Moving Average) para capturar tendências recentes
+      const ema = this.calculateEMA(candles, maPeriods.short);
+      
+      // Calcular momentum com diferentes períodos
+      const shortMomentum = (currentPrice.price - candles[maPeriods.short - 1].close) / candles[maPeriods.short - 1].close;
+      const mediumMomentum = (currentPrice.price - candles[maPeriods.medium - 1].close) / candles[maPeriods.medium - 1].close;
+      
+      // Calcular volatilidade (ATR - Average True Range)
+      const atr = this.calculateATR(candles, 14);
+      const volatilityPercent = atr / currentPrice.price;
+      
+      // Determinar tendência com múltiplos indicadores
+      const trendScore = 
+        (shortMA > mediumMA ? 1 : -1) +
+        (mediumMA > longMA ? 1 : -1) +
+        (ema > shortMA ? 1 : -1) +
+        (shortMomentum > 0 ? 1 : -1);
+      
       const trend: 'bullish' | 'bearish' | 'neutral' = 
-        shortMA > longMA * 1.001 ? 'bullish' :
-        shortMA < longMA * 0.999 ? 'bearish' : 'neutral';
+        trendScore >= 2 ? 'bullish' :
+        trendScore <= -2 ? 'bearish' : 'neutral';
       
-      // Calcular previsão baseada em:
-      // 1. Preço atual
-      // 2. Momentum
-      // 3. Tendência
-      // 4. Volatilidade
+      // Calcular volume relativo
+      const avgVolume = candles.slice(0, 20).reduce((sum, c) => sum + c.volume, 0) / 20;
+      const volumeRatio = candles[0].volume / avgVolume;
+      
+      // Calcular RSI (Relative Strength Index)
+      const rsi = this.calculateRSI(candles, 14);
+      
+      // PREVISÃO AVANÇADA COM MÚLTIPLOS FATORES
       let predictedClose = currentPrice.price;
       
-      // Aplicar momentum com peso baseado na volatilidade
-      const momentumWeight = Math.min(volatility / currentPrice.price, 0.02); // Máximo 2%
-      predictedClose += currentPrice.price * momentum * momentumWeight;
+      // 1. Aplicar momentum ponderado (peso maior para timeframes menores)
+      const momentumWeights = { '1m': 0.4, '15m': 0.3, '1h': 0.2, '4h': 0.1 };
+      const momentumWeight = momentumWeights[timeframe];
+      const combinedMomentum = (shortMomentum * 0.6 + mediumMomentum * 0.4);
+      predictedClose += currentPrice.price * combinedMomentum * momentumWeight;
       
-      // Aplicar ajuste de tendência
+      // 2. Aplicar ajuste de tendência baseado em múltiplas MAs
+      const trendStrength = Math.abs(trendScore) / 4; // 0 a 1
+      const trendAdjustment = atr * trendStrength * 0.5;
+      
       if (trend === 'bullish') {
-        predictedClose += volatility * 0.3;
+        predictedClose += trendAdjustment;
       } else if (trend === 'bearish') {
-        predictedClose -= volatility * 0.3;
+        predictedClose -= trendAdjustment;
       }
       
-      // Calcular confiança baseada em:
-      // - Consistência da tendência
-      // - Volume relativo
-      // - Volatilidade (menor volatilidade = maior confiança)
-      const trendConsistency = Math.abs(shortMA - longMA) / longMA;
-      const volumeRatio = candles[0].volume / avgVolume;
-      const volatilityFactor = 1 - Math.min(volatility / currentPrice.price / 0.05, 1);
+      // 3. Ajuste baseado em RSI (sobrecompra/sobrevenda)
+      if (rsi > 70) {
+        // Sobrecompra - possível correção para baixo
+        predictedClose -= atr * 0.2;
+      } else if (rsi < 30) {
+        // Sobrevenda - possível recuperação
+        predictedClose += atr * 0.2;
+      }
+      
+      // 4. Ajuste baseado em volume (volume alto = movimento mais confiável)
+      const volumeWeight = Math.min(volumeRatio, 2) / 2; // 0 a 1
+      const volumeAdjustment = (predictedClose - currentPrice.price) * volumeWeight;
+      predictedClose = currentPrice.price + volumeAdjustment;
+      
+      // 5. SUAVIZAÇÃO PROGRESSIVA (evita mudanças bruscas)
+      const cacheKey = `${normalizedSymbol}_${timeframe}`;
+      const previousPrediction = this.predictionCache.get(cacheKey);
+      
+      if (previousPrediction) {
+        // Fatores de suavização baseados no timeframe
+        const smoothingFactors = { '1m': 0.3, '15m': 0.5, '1h': 0.7, '4h': 0.85 };
+        const smoothingFactor = smoothingFactors[timeframe];
+        
+        // Média ponderada entre previsão anterior e nova
+        predictedClose = previousPrediction * smoothingFactor + predictedClose * (1 - smoothingFactor);
+      }
+      
+      // Atualizar cache
+      this.predictionCache.set(cacheKey, predictedClose);
+      
+      // 6. Limitar variação máxima baseada na volatilidade
+      const maxChange = atr * 2; // Máximo 2x ATR de variação
+      const change = predictedClose - currentPrice.price;
+      if (Math.abs(change) > maxChange) {
+        predictedClose = currentPrice.price + (change > 0 ? maxChange : -maxChange);
+      }
+      
+      // Calcular confiança baseada em múltiplos fatores
+      const trendConsistency = trendStrength * 25; // 0-25 pontos
+      const volumeConfidence = Math.min(volumeRatio * 15, 20); // 0-20 pontos
+      const volatilityConfidence = (1 - Math.min(volatilityPercent / 0.05, 1)) * 25; // 0-25 pontos
+      const rsiConfidence = (rsi > 30 && rsi < 70) ? 15 : 5; // 5-15 pontos
+      const maAlignment = (Math.abs(trendScore) / 4) * 15; // 0-15 pontos
       
       const confidence = Math.min(
-        (trendConsistency * 30 + volumeRatio * 20 + volatilityFactor * 50),
+        trendConsistency + volumeConfidence + volatilityConfidence + rsiConfidence + maAlignment,
         95
       );
       
@@ -374,6 +449,8 @@ export class OKXApiClient {
       return {
         timeframe,
         predictedClose: Math.max(predictedClose, 0),
+        previousClose,
+        recentPrices,
         confidence: Math.round(confidence),
         timeRemaining: Math.max(timeRemaining, 0),
         currentTrend: trend,
@@ -386,11 +463,81 @@ export class OKXApiClient {
       return {
         timeframe,
         predictedClose: marketData.price,
+        previousClose: marketData.price,
+        recentPrices: [marketData.price],
         confidence: 50,
         timeRemaining: 0,
         currentTrend: 'neutral',
       };
     }
+  }
+  
+  // Calcular média móvel simples
+  private calculateMA(candles: Candle[], period: number): number {
+    const slice = candles.slice(0, Math.min(period, candles.length));
+    return slice.reduce((sum, c) => sum + c.close, 0) / slice.length;
+  }
+  
+  // Calcular média móvel exponencial
+  private calculateEMA(candles: Candle[], period: number): number {
+    if (candles.length < period) return this.calculateMA(candles, candles.length);
+    
+    const multiplier = 2 / (period + 1);
+    let ema = this.calculateMA(candles.slice(-period), period);
+    
+    for (let i = candles.length - period - 1; i >= 0; i--) {
+      ema = (candles[i].close - ema) * multiplier + ema;
+    }
+    
+    return ema;
+  }
+  
+  // Calcular ATR (Average True Range)
+  private calculateATR(candles: Candle[], period: number): number {
+    if (candles.length < period + 1) return 0;
+    
+    const trueRanges: number[] = [];
+    
+    for (let i = 0; i < Math.min(period, candles.length - 1); i++) {
+      const high = candles[i].high;
+      const low = candles[i].low;
+      const prevClose = candles[i + 1].close;
+      
+      const tr = Math.max(
+        high - low,
+        Math.abs(high - prevClose),
+        Math.abs(low - prevClose)
+      );
+      
+      trueRanges.push(tr);
+    }
+    
+    return trueRanges.reduce((sum, tr) => sum + tr, 0) / trueRanges.length;
+  }
+  
+  // Calcular RSI (Relative Strength Index)
+  private calculateRSI(candles: Candle[], period: number): number {
+    if (candles.length < period + 1) return 50;
+    
+    let gains = 0;
+    let losses = 0;
+    
+    for (let i = 0; i < period; i++) {
+      const change = candles[i].close - candles[i + 1].close;
+      if (change > 0) {
+        gains += change;
+      } else {
+        losses -= change;
+      }
+    }
+    
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    
+    if (avgLoss === 0) return 100;
+    
+    const rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
   }
 
   // Executar ordem (autenticado)
