@@ -14,13 +14,23 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   mode: 'DRY_RUN' as TradingMode,
   symbol: 'BTC-USDT',
   interval: '5m',
+  strategy: 'SHORT_TERM',
   rsiPeriod: 14,
   rsiOverbought: 70,
   rsiOversold: 30,
   maPeriod: 20,
+  emaPeriod: 12,
+  bollingerPeriod: 20,
+  bollingerStdDev: 2,
+  macdFast: 12,
+  macdSlow: 26,
+  macdSignal: 9,
+  atrPeriod: 14,
   stopLossPercent: 2,
   takeProfitPercent: 3,
   tradeAmount: 100,
+  riskPercentage: 1,
+  dryRunBalance: 10000, // Patrimônio padrão para DRY RUN
 };
 
 // API Credentials
@@ -43,13 +53,26 @@ export const clearApiCredentials = (): void => {
 // Bot Config
 export const saveBotConfig = (config: BotConfig): void => {
   if (typeof window === 'undefined') return;
-  localStorage.setItem(STORAGE_KEYS.BOT_CONFIG, JSON.stringify(config));
+  // Garantir que dryRunBalance seja salvo corretamente
+  const configToSave = {
+    ...config,
+    dryRunBalance: config.dryRunBalance || 10000, // Garantir valor padrão
+  };
+  localStorage.setItem(STORAGE_KEYS.BOT_CONFIG, JSON.stringify(configToSave));
 };
 
 export const getBotConfig = (): BotConfig => {
   if (typeof window === 'undefined') return DEFAULT_BOT_CONFIG;
   const data = localStorage.getItem(STORAGE_KEYS.BOT_CONFIG);
-  return data ? JSON.parse(data) : DEFAULT_BOT_CONFIG;
+  if (!data) return DEFAULT_BOT_CONFIG;
+  
+  const savedConfig = JSON.parse(data);
+  // Garantir que dryRunBalance esteja presente
+  return {
+    ...DEFAULT_BOT_CONFIG,
+    ...savedConfig,
+    dryRunBalance: savedConfig.dryRunBalance || 10000,
+  };
 };
 
 // Trade History

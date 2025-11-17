@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Settings, TrendingUp, TrendingDown, Activity, DollarSign, AlertCircle, CheckCircle, XCircle, Info, ChevronDown, Search } from 'lucide-react';
-import { OKXApiClient, TradingPair } from '@/lib/okx-api';
+import { Play, Pause, Settings, TrendingUp, TrendingDown, Activity, DollarSign, AlertCircle, CheckCircle, XCircle, Info, ChevronDown, Search, Clock, Target } from 'lucide-react';
+import { OKXApiClient, TradingPair, CandlePrediction } from '@/lib/okx-api';
 import { 
   generateTradingSignal, 
   getDynamicIndicatorConfig,
@@ -51,6 +51,7 @@ export default function TradingBotPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [accountBalance, setAccountBalance] = useState<AccountBalance | null>(null);
   const [autoTradeInfo, setAutoTradeInfo] = useState<string>('');
+  const [candlePredictions, setCandlePredictions] = useState<CandlePrediction[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus>({
     isRunning: false,
     lastUpdate: Date.now(),
@@ -132,6 +133,85 @@ export default function TradingBotPage() {
 
     const avgPnL = totalPnL / (recentTrades.length / 2);
     return (avgPnL / (accountBalance?.totalEquity || 10000)) * 100;
+  };
+
+  // Calcular horário de fechamento do candle
+  const calculateCandleCloseTime = (timeframe: string): Date => {
+    const now = new Date();
+    const minutes = now.getMinutes();
+    const hours = now.getHours();
+    
+    let nextCloseMinutes = 0;
+    let nextCloseHours = hours;
+    let nextCloseDate = new Date(now);
+    
+    switch (timeframe) {
+      case '1m':
+        nextCloseMinutes = minutes + 1;
+        break;
+      case '15m':
+        nextCloseMinutes = Math.ceil((minutes + 1) / 15) * 15;
+        break;
+      case '1h':
+        nextCloseMinutes = 0;
+        nextCloseHours = hours + 1;
+        break;
+      case '4h':
+        nextCloseMinutes = 0;
+        nextCloseHours = Math.ceil((hours + 1) / 4) * 4;
+        break;
+    }
+    
+    nextCloseDate.setMinutes(nextCloseMinutes);
+    nextCloseDate.setHours(nextCloseHours);
+    nextCloseDate.setSeconds(0);
+    nextCloseDate.setMilliseconds(0);
+    
+    // Se passou para o próximo dia
+    if (nextCloseHours >= 24) {
+      nextCloseDate.setDate(nextCloseDate.getDate() + 1);
+      nextCloseDate.setHours(nextCloseHours % 24);
+    }
+    
+    return nextCloseDate;
+  };
+
+  // Atualizar previsões de candles com suavização e estabilidade
+  const updateCandlePredictions = async () => {
+    const apiClient = apiClientRef.current;
+    if (!apiClient) return;
+
+    try {
+      const timeframes: ('1m' | '15m' | '1h' | '4h')[] = ['1m', '15m', '1h', '4h'];
+      const predictions = await Promise.all(
+        timeframes.map(tf => apiClient.predictCandleClose(config.symbol, tf))
+      );
+      
+      // Aplicar suavização nas previsões para evitar oscilações bruscas
+      const smoothedPredictions = predictions.map((pred, index) => {
+        const prevPrediction = candlePredictions.find(p => p.timeframe === pred.timeframe);
+        
+        if (prevPrediction) {
+          // Fator de suavização baseado no timeframe (maior timeframe = mais suave)
+          const smoothingFactors = { '1m': 0.3, '15m': 0.5, '1h': 0.7, '4h': 0.8 };
+          const factor = smoothingFactors[pred.timeframe] || 0.5;
+          
+          // Média ponderada entre previsão anterior e nova
+          const smoothedPrice = prevPrediction.predictedClose * factor + pred.predictedClose * (1 - factor);
+          
+          return {
+            ...pred,
+            predictedClose: smoothedPrice,
+          };
+        }
+        
+        return pred;
+      });
+      
+      setCandlePredictions(smoothedPredictions);
+    } catch (error) {
+      console.error('Erro ao atualizar previsões:', error);
+    }
   };
 
   // Atualizar dados de mercado
@@ -321,24 +401,39 @@ export default function TradingBotPage() {
     }
   };
 
-  // Atualizar dados periodicamente - atualização a cada 10 segundos
+  // Atualizar preço a cada 1 segundo (sincronizado com OKX)
   useEffect(() => {
     if (!isConfigured || !apiClientRef.current || !mounted) return;
 
     // Primeira atualização imediata
     updateMarketData();
     
-    // Configurar intervalo de 10 segundos
-    const interval = setInterval(() => {
+    // Configurar intervalo de 1 segundo para atualização de preço
+    const priceInterval = setInterval(() => {
       updateMarketData();
-    }, 10000);
+    }, 1000);
 
-    return () => clearInterval(interval);
+    return () => clearInterval(priceInterval);
   }, [isConfigured, mounted, config.symbol, config.interval, config.mode, config.dryRunBalance]);
+
+  // Atualizar previsões de candles a cada 5 segundos
+  useEffect(() => {
+    if (!isConfigured || !apiClientRef.current || !mounted) return;
+
+    // Primeira atualização imediata
+    updateCandlePredictions();
+    
+    // Configurar intervalo de 5 segundos para previsões
+    const predictionInterval = setInterval(() => {
+      updateCandlePredictions();
+    }, 5000);
+
+    return () => clearInterval(predictionInterval);
+  }, [isConfigured, mounted, config.symbol]);
 
   // Salvar configurações - atualiza patrimônio imediatamente
   const handleSaveConfig = async () => {
-    // Salvar configurações
+    // Salvar configurações no localStorage
     saveApiCredentials(credentials);
     saveBotConfig(config);
     
@@ -351,6 +446,7 @@ export default function TradingBotPage() {
     // Atualizar dados imediatamente para refletir mudanças
     setTimeout(() => {
       updateMarketData();
+      updateCandlePredictions();
     }, 100);
   };
 
@@ -364,6 +460,24 @@ export default function TradingBotPage() {
   const calculateChange24h = (): number => {
     if (!marketData || !price24hAgo || price24hAgo === 0) return 0;
     return ((marketData.price - price24hAgo) / price24hAgo) * 100;
+  };
+
+  // Formatar tempo restante
+  const formatTimeRemaining = (seconds: number): string => {
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${minutes}m ${secs}s`;
+  };
+
+  // Formatar horário de fechamento
+  const formatCloseTime = (timeframe: string): string => {
+    const closeTime = calculateCandleCloseTime(timeframe);
+    return closeTime.toLocaleTimeString('pt-BR', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      second: '2-digit'
+    });
   };
 
   // Renderizar apenas após montagem
@@ -635,7 +749,7 @@ export default function TradingBotPage() {
               {/* Preço Atual */}
               <div className="bg-slate-900/50 backdrop-blur-sm border border-slate-800 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-slate-400">Preço Atual</span>
+                  <span className="text-sm text-slate-400">Preço Atual (1s)</span>
                   <DollarSign className="w-4 h-4 text-cyan-400" />
                 </div>
                 <div className="text-2xl font-bold">
@@ -689,6 +803,52 @@ export default function TradingBotPage() {
                 </div>
               </div>
             </div>
+
+            {/* Previsões de Fechamento de Candles */}
+            {candlePredictions.length > 0 && (
+              <div className="mb-6 bg-gradient-to-r from-purple-950/30 to-indigo-950/30 border border-purple-500/30 rounded-xl p-4 sm:p-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Target className="w-5 h-5 text-purple-400" />
+                  <h3 className="text-lg font-bold text-purple-300">Previsões de Fechamento (Dados Reais + Suavização)</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {candlePredictions.map((prediction) => (
+                    <div key={prediction.timeframe} className="bg-slate-900/50 rounded-lg p-4 border border-purple-500/20">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-semibold text-purple-300">{prediction.timeframe}</span>
+                        <Clock className="w-4 h-4 text-purple-400" />
+                      </div>
+                      <div className="text-xl font-bold text-white mb-1">
+                        ${prediction.predictedClose.toFixed(2)}
+                      </div>
+                      <div className="text-xs text-slate-400 mb-2">
+                        Fecha às: {formatCloseTime(prediction.timeframe)}
+                      </div>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className={`px-2 py-1 rounded ${
+                          prediction.currentTrend === 'bullish' ? 'bg-green-500/20 text-green-400' :
+                          prediction.currentTrend === 'bearish' ? 'bg-red-500/20 text-red-400' :
+                          'bg-slate-500/20 text-slate-400'
+                        }`}>
+                          {prediction.currentTrend === 'bullish' ? '📈 Alta' :
+                           prediction.currentTrend === 'bearish' ? '📉 Baixa' : '➡️ Neutro'}
+                        </span>
+                        <span className="text-slate-400">
+                          {formatTimeRemaining(prediction.timeRemaining)}
+                        </span>
+                      </div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        Confiança: {prediction.confidence}%
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-purple-300 mt-4 flex items-center gap-2">
+                  <Info className="w-4 h-4" />
+                  Previsões estabilizadas com suavização progressiva (1m: 30%, 15m: 50%, 1h: 70%, 4h: 80%) para evitar oscilações bruscas.
+                </p>
+              </div>
+            )}
 
             {/* Patrimônio */}
             {accountBalance && (

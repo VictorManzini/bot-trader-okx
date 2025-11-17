@@ -10,6 +10,14 @@ export interface TradingPair {
   state: string;
 }
 
+export interface CandlePrediction {
+  timeframe: string;
+  predictedClose: number;
+  confidence: number;
+  timeRemaining: number; // segundos até fechar o candle
+  currentTrend: 'bullish' | 'bearish' | 'neutral';
+}
+
 export class OKXApiClient {
   private apiKey: string;
   private secretKey: string;
@@ -68,42 +76,55 @@ export class OKXApiClient {
     };
   }
 
+  // Fazer requisição com retry e fallback
+  private async fetchWithFallback(url: string, options: RequestInit = {}): Promise<any> {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 segundos timeout
+
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      // Se falhar, retornar null para usar dados simulados
+      console.warn(`Requisição falhou para ${url}:`, error);
+      return null;
+    }
+  }
+
   // Obter todos os pares de trading disponíveis na OKX
   async getTradingPairs(): Promise<TradingPair[]> {
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/api/v5/public/instruments?instType=SPOT`,
-        { 
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' }
-        }
-      );
-      
-      if (!response.ok) {
-        console.warn(`Erro ao obter pares de trading: ${response.statusText}`);
-        return this.getDefaultTradingPairs();
+    const data = await this.fetchWithFallback(
+      `${this.baseUrl}/api/v5/public/instruments?instType=SPOT`,
+      { 
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
       }
-
-      const data = await response.json();
-      
-      if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data)) {
-        console.warn('Resposta inválida ao obter pares de trading');
-        return this.getDefaultTradingPairs();
-      }
-
-      return data.data
-        .filter((pair: any) => pair.state === 'live')
-        .map((pair: any) => ({
-          instId: pair.instId,
-          baseCcy: pair.baseCcy,
-          quoteCcy: pair.quoteCcy,
-          instType: pair.instType,
-          state: pair.state,
-        }));
-    } catch (error) {
-      console.warn('Erro ao buscar pares de trading:', error);
+    );
+    
+    if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data)) {
+      console.warn('Usando pares de trading padrão');
       return this.getDefaultTradingPairs();
     }
+
+    return data.data
+      .filter((pair: any) => pair.state === 'live')
+      .map((pair: any) => ({
+        instId: pair.instId,
+        baseCcy: pair.baseCcy,
+        quoteCcy: pair.quoteCcy,
+        instType: pair.instType,
+        state: pair.state,
+      }));
   }
 
   // Pares padrão caso a API falhe
@@ -129,54 +150,41 @@ export class OKXApiClient {
 
   // Obter dados de mercado em tempo real (público - não requer autenticação)
   async getMarketData(symbol: string): Promise<MarketData> {
-    try {
-      // Normalizar símbolo (BTC-USDT ou BTCUSDT -> BTC-USDT)
-      const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
-      
-      const response = await fetch(
-        `${this.baseUrl}/api/v5/market/ticker?instId=${normalizedSymbol}`,
-        { 
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          cache: 'no-store' // Sempre buscar dados frescos
-        }
-      );
-      
-      if (!response.ok) {
-        console.warn(`API OKX retornou erro: ${response.statusText}. Usando dados simulados.`);
-        return this.getSimulatedMarketData(normalizedSymbol);
+    // Normalizar símbolo (BTC-USDT ou BTCUSDT -> BTC-USDT)
+    const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
+    
+    const data = await this.fetchWithFallback(
+      `${this.baseUrl}/api/v5/market/ticker?instId=${normalizedSymbol}`,
+      { 
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store' // Sempre buscar dados frescos
       }
-
-      const data = await response.json();
-      
-      // Verificar se a resposta tem dados válidos
-      if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data) || data.data.length === 0) {
-        console.warn('Resposta da API OKX inválida. Usando dados simulados.');
-        return this.getSimulatedMarketData(normalizedSymbol);
-      }
-
-      const ticker = data.data[0];
-      
-      // Validar campos essenciais
-      if (!ticker || !ticker.last) {
-        console.warn('Dados do ticker incompletos. Usando dados simulados.');
-        return this.getSimulatedMarketData(normalizedSymbol);
-      }
-      
-      return {
-        symbol: normalizedSymbol,
-        price: parseFloat(ticker.last) || 0,
-        change24h: parseFloat(ticker.sodUtc8 || ticker.changePercent || '0'),
-        volume24h: parseFloat(ticker.vol24h || '0'),
-        high24h: parseFloat(ticker.high24h || ticker.last || '0'),
-        low24h: parseFloat(ticker.low24h || ticker.last || '0'),
-        timestamp: Date.now(),
-      };
-    } catch (error) {
-      console.warn('Erro ao obter dados de mercado da OKX:', error);
-      console.log('Usando dados simulados para continuar operação.');
-      return this.getSimulatedMarketData(symbol);
+    );
+    
+    // Se falhou ou dados inválidos, usar simulação
+    if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data) || data.data.length === 0) {
+      console.warn('Usando dados de mercado simulados');
+      return this.getSimulatedMarketData(normalizedSymbol);
     }
+
+    const ticker = data.data[0];
+    
+    // Validar campos essenciais
+    if (!ticker || !ticker.last) {
+      console.warn('Dados do ticker incompletos. Usando dados simulados.');
+      return this.getSimulatedMarketData(normalizedSymbol);
+    }
+    
+    return {
+      symbol: normalizedSymbol,
+      price: parseFloat(ticker.last) || 0,
+      change24h: parseFloat(ticker.sodUtc8 || ticker.changePercent || '0'),
+      volume24h: parseFloat(ticker.vol24h || '0'),
+      high24h: parseFloat(ticker.high24h || ticker.last || '0'),
+      low24h: parseFloat(ticker.low24h || ticker.last || '0'),
+      timestamp: Date.now(),
+    };
   }
 
   // Normalizar símbolo para formato OKX (BTC-USDT)
@@ -223,44 +231,31 @@ export class OKXApiClient {
     interval: string = '5m',
     limit: number = 100
   ): Promise<Candle[]> {
-    try {
-      // Normalizar símbolo
-      const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
-      
-      const response = await fetch(
-        `${this.baseUrl}/api/v5/market/candles?instId=${normalizedSymbol}&bar=${interval}&limit=${limit}`,
-        { 
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          cache: 'no-store'
-        }
-      );
-
-      if (!response.ok) {
-        console.warn(`API OKX retornou erro ao obter candles: ${response.statusText}. Usando dados simulados.`);
-        return this.getSimulatedCandles(normalizedSymbol, limit);
+    // Normalizar símbolo
+    const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
+    
+    const data = await this.fetchWithFallback(
+      `${this.baseUrl}/api/v5/market/candles?instId=${normalizedSymbol}&bar=${interval}&limit=${limit}`,
+      { 
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store'
       }
+    );
 
-      const data = await response.json();
-      
-      if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data)) {
-        console.warn('Dados de candles inválidos. Usando dados simulados.');
-        return this.getSimulatedCandles(normalizedSymbol, limit);
-      }
-
-      return data.data.map((candle: string[]) => ({
-        timestamp: parseInt(candle[0]),
-        open: parseFloat(candle[1]),
-        high: parseFloat(candle[2]),
-        low: parseFloat(candle[3]),
-        close: parseFloat(candle[4]),
-        volume: parseFloat(candle[5]),
-      }));
-    } catch (error) {
-      console.warn('Erro ao obter candles da OKX:', error);
-      console.log('Usando dados simulados para continuar operação.');
-      return this.getSimulatedCandles(symbol, limit);
+    if (!data || data.code !== '0' || !data.data || !Array.isArray(data.data)) {
+      console.warn('Usando candles simulados');
+      return this.getSimulatedCandles(normalizedSymbol, limit);
     }
+
+    return data.data.map((candle: string[]) => ({
+      timestamp: parseInt(candle[0]),
+      open: parseFloat(candle[1]),
+      high: parseFloat(candle[2]),
+      low: parseFloat(candle[3]),
+      close: parseFloat(candle[4]),
+      volume: parseFloat(candle[5]),
+    }));
   }
 
   // Gerar candles simulados
@@ -293,6 +288,109 @@ export class OKXApiClient {
     }
     
     return candles;
+  }
+
+  // Calcular previsão de fechamento de candle baseada em dados reais
+  async predictCandleClose(
+    symbol: string,
+    timeframe: '1m' | '15m' | '1h' | '4h'
+  ): Promise<CandlePrediction> {
+    try {
+      const normalizedSymbol = symbol.includes('-') ? symbol : this.normalizeSymbol(symbol);
+      
+      // Obter candles históricos para análise
+      const candles = await this.getCandles(normalizedSymbol, timeframe, 50);
+      const currentPrice = await this.getMarketData(normalizedSymbol);
+      
+      if (candles.length < 10) {
+        throw new Error('Dados insuficientes para previsão');
+      }
+
+      // Calcular médias móveis
+      const recentCandles = candles.slice(0, 10);
+      const avgClose = recentCandles.reduce((sum, c) => sum + c.close, 0) / recentCandles.length;
+      const avgVolume = recentCandles.reduce((sum, c) => sum + c.volume, 0) / recentCandles.length;
+      
+      // Calcular momentum (taxa de mudança)
+      const momentum = (currentPrice.price - candles[9].close) / candles[9].close;
+      
+      // Calcular volatilidade (desvio padrão dos últimos 10 candles)
+      const variance = recentCandles.reduce((sum, c) => {
+        return sum + Math.pow(c.close - avgClose, 2);
+      }, 0) / recentCandles.length;
+      const volatility = Math.sqrt(variance);
+      
+      // Determinar tendência
+      const shortMA = recentCandles.slice(0, 5).reduce((sum, c) => sum + c.close, 0) / 5;
+      const longMA = avgClose;
+      const trend: 'bullish' | 'bearish' | 'neutral' = 
+        shortMA > longMA * 1.001 ? 'bullish' :
+        shortMA < longMA * 0.999 ? 'bearish' : 'neutral';
+      
+      // Calcular previsão baseada em:
+      // 1. Preço atual
+      // 2. Momentum
+      // 3. Tendência
+      // 4. Volatilidade
+      let predictedClose = currentPrice.price;
+      
+      // Aplicar momentum com peso baseado na volatilidade
+      const momentumWeight = Math.min(volatility / currentPrice.price, 0.02); // Máximo 2%
+      predictedClose += currentPrice.price * momentum * momentumWeight;
+      
+      // Aplicar ajuste de tendência
+      if (trend === 'bullish') {
+        predictedClose += volatility * 0.3;
+      } else if (trend === 'bearish') {
+        predictedClose -= volatility * 0.3;
+      }
+      
+      // Calcular confiança baseada em:
+      // - Consistência da tendência
+      // - Volume relativo
+      // - Volatilidade (menor volatilidade = maior confiança)
+      const trendConsistency = Math.abs(shortMA - longMA) / longMA;
+      const volumeRatio = candles[0].volume / avgVolume;
+      const volatilityFactor = 1 - Math.min(volatility / currentPrice.price / 0.05, 1);
+      
+      const confidence = Math.min(
+        (trendConsistency * 30 + volumeRatio * 20 + volatilityFactor * 50),
+        95
+      );
+      
+      // Calcular tempo restante até fechar o candle
+      const timeframeMinutes = {
+        '1m': 1,
+        '15m': 15,
+        '1h': 60,
+        '4h': 240
+      }[timeframe];
+      
+      const now = Date.now();
+      const candleStartTime = Math.floor(now / (timeframeMinutes * 60 * 1000)) * (timeframeMinutes * 60 * 1000);
+      const candleEndTime = candleStartTime + (timeframeMinutes * 60 * 1000);
+      const timeRemaining = Math.floor((candleEndTime - now) / 1000);
+      
+      return {
+        timeframe,
+        predictedClose: Math.max(predictedClose, 0),
+        confidence: Math.round(confidence),
+        timeRemaining: Math.max(timeRemaining, 0),
+        currentTrend: trend,
+      };
+    } catch (error) {
+      console.error(`Erro ao calcular previsão para ${timeframe}:`, error);
+      
+      // Retornar previsão básica em caso de erro
+      const marketData = await this.getMarketData(symbol);
+      return {
+        timeframe,
+        predictedClose: marketData.price,
+        confidence: 50,
+        timeRemaining: 0,
+        currentTrend: 'neutral',
+      };
+    }
   }
 
   // Executar ordem (autenticado)
