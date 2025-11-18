@@ -81,29 +81,71 @@ export class OKXApiClient {
     };
   }
 
-  // Fazer requisição com retry e fallback
-  private async fetchWithFallback(url: string, options: RequestInit = {}): Promise<any> {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 segundos timeout
+  // Fazer requisição com retry e fallback robusto
+  private async fetchWithFallback(url: string, options: RequestInit = {}, retries: number = 2): Promise<any> {
+    let lastError: any = null;
+    
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      let controller: AbortController | null = null;
+      let timeoutId: NodeJS.Timeout | null = null;
+      
+      try {
+        controller = new AbortController();
+        
+        // Timeout de 10 segundos (aumentado para APIs lentas)
+        timeoutId = setTimeout(() => {
+          if (controller) {
+            controller.abort();
+          }
+        }, 10000);
 
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
+        // Limpar timeout imediatamente após sucesso
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        return data;
+        
+      } catch (error: any) {
+        lastError = error;
+        
+        // Limpar timeout em caso de erro
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        
+        // Se for AbortError ou erro de rede, tentar novamente
+        const isAbortError = error.name === 'AbortError' || error.message?.includes('aborted');
+        const isNetworkError = error.message?.includes('fetch') || error.message?.includes('network');
+        
+        if ((isAbortError || isNetworkError) && attempt < retries) {
+          console.warn(`Tentativa ${attempt + 1}/${retries + 1} falhou para ${url}, tentando novamente...`);
+          // Aguardar um pouco antes de tentar novamente (backoff exponencial)
+          await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+          continue;
+        }
+        
+        // Se esgotou as tentativas ou é outro tipo de erro
+        console.warn(`Requisição falhou após ${attempt + 1} tentativa(s) para ${url}:`, error.message);
+        return null;
       }
-
-      return await response.json();
-    } catch (error) {
-      // Se falhar, retornar null para usar dados simulados
-      console.warn(`Requisição falhou para ${url}:`, error);
-      return null;
     }
+    
+    // Se chegou aqui, todas as tentativas falharam
+    console.warn(`Todas as tentativas falharam para ${url}. Usando dados simulados.`);
+    return null;
   }
 
   // Obter todos os pares de trading disponíveis na OKX
