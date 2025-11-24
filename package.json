@@ -73,6 +73,7 @@
     "zod": "^3.25.76",
     "@tensorflow/tfjs": "latest",
     "@tensorflow/tfjs-node": "latest",
+    "xgboost-node": "latest",
     "ml-matrix": "latest"
   },
   "devDependencies": {
